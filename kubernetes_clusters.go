@@ -37,19 +37,20 @@ func warming(ctx context.Context) {
 		log.WithError(err).Fatal("failed to get kubeconfig")
 	}
 
-	for kc, _ := range kubeConfig.Contexts {
+	for kc := range kubeConfig.Contexts {
 		kubeContext := kc
 
 		config, err := getClientConfigWithContext(kubeConfig, kubeContext)
 		if err != nil {
-			log.WithError(err).Fatal("failed to create client config")
+			log.WithError(err).WithField("kubeContext", kubeContext).Warn("failed to create client config")
+			continue
 		}
 
-		go func () {
+		go func() {
 			wg.Add(1)
 			err := warmClusterConnection(ctx, kubeContext, config)
 			if err != nil {
-				log.WithError(err).Warn("fatal error warming cluster")
+				log.WithError(err).WithField("kubeContext", kubeContext).Warn("fatal error warming cluster")
 			}
 			wg.Done()
 		}()
@@ -93,26 +94,30 @@ func warmClusterConnection(ctx context.Context, context string, config *rest.Con
 	log.Infof("warming %s", context)
 
 	ticker := time.NewTicker(5 * time.Second)
+	var retries int8
 
 	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create kube client for context: %s", context)
 	}
 
-	for  {
+	for {
 		select {
-		case <- ticker.C:
+		case <-ticker.C:
 			_, err = client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 			if err != nil {
 				log.WithError(err).Warnf("failed to contact cluster: %s", context)
+				retries = retries + 1
+			}
+			if retries >= 5 {
+				log.WithError(err).Warnf("failed to contact cluster %s at least 5 times, giving up", context)
+				return nil
 			}
 
 		case <-ctx.Done():
 			return nil
 		}
 	}
-
-	return nil
 }
 
 func signalShutdownHandler(cancelFunction context.CancelFunc) {
